@@ -1,142 +1,225 @@
 import streamlit as st
-import time
 import requests
 from bs4 import BeautifulSoup
+import time
 from collections import Counter
+import pandas as pd
 
-# --- Scraper functions ---
+# Page configuration
+st.set_page_config(
+    page_title="AI/ML Job Market Analyzer", 
+    layout="wide",
+    page_icon="🔍"
+)
 
+# Title and description
+st.title("🔍 AI/ML Job Market Analyzer - MENA Region")
+st.markdown("""
+This tool scrapes job postings from Wuzzuf based on your search criteria, analyzes required skills, 
+and presents insights about the AI/ML job market.
+""")
+
+# Sidebar controls
+with st.sidebar:
+    st.header("⚙️ Search Parameters")
+    
+    # User inputs
+    col1, col2 = st.columns(2)
+    with col1:
+        job_query = st.text_input("Job Keywords", placeholder="e.g. Machine Learning")
+    with col2:
+        location = st.text_input("Location", placeholder="e.g. Egypt or Saudi Arabia")
+    
+    max_pages = st.slider("Number of Pages", 1, 10, 2, help="Each page contains ~10 jobs")
+    
+    advanced = st.expander("Advanced Options")
+    with advanced:
+        skill_keywords = st.text_area("Skills to Track (comma-separated)", 
+                                    "Python, TensorFlow, PyTorch, Deep Learning, NLP, SQL, Docker, Keras, Scikit-learn")
+        skill_list = [skill.strip() for skill in skill_keywords.split(",") if skill.strip()]
+    
+    st.markdown("---")
+    st.markdown("**Note:** Please use responsibly and avoid excessive server requests")
+
+# Job description scraper
 def get_job_description(job_url):
     try:
-        resp = requests.get(job_url)
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        resp = requests.get(job_url, headers=headers, timeout=10)
         if resp.status_code != 200:
-            st.warning(f"Failed to fetch job description: {job_url}")
             return ""
-
         soup = BeautifulSoup(resp.text, "html.parser")
-        desc_div = soup.find('div', class_='css-1m4cuuf')  # Adjust if needed
-        if desc_div:
-            description = desc_div.get_text(separator=' ').strip()
-            return description
-        return ""
+        desc_div = soup.find('div', class_='css-1m4cuuf') or soup.find('div', class_='css-1uobp1k')
+        return desc_div.get_text(separator=' ').strip() if desc_div else ""
     except Exception as e:
-        st.error(f"Error fetching job description: {e}")
+        st.error(f"Error fetching description: {str(e)}")
         return ""
 
-def scrape_wuzzuf_with_desc(query="AI", location="Egypt", max_pages=2):
+# Main scraping function
+def scrape_wuzzuf_jobs(query, location, max_pages):
     jobs = []
     base_url = f"https://wuzzuf.net/search/jobs/?q={query}&a=hpb&l={location}"
-
+    
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
     for page in range(max_pages):
-        start = page * 10
-        url = base_url + f"&start={start}"
-        st.info(f"Scraping page {page+1}: {url}")
-        resp = requests.get(url)
-        if resp.status_code != 200:
-            st.warning(f"Failed to retrieve page {page+1}")
-            break
-
-        soup = BeautifulSoup(resp.text, "html.parser")
-        job_cards = soup.find_all('div', class_='css-1gatmva e1v1l3u10')
-
-        for card in job_cards:
-            try:
-                title = card.find('h2').text.strip()
-                company = card.find('a', class_='css-17s97q8').text.strip()
-                loc = card.find('span', class_='css-5wys0k').text.strip()
-                link = card.find('a')['href']
-                full_link = link if link.startswith('http') else "https://wuzzuf.net" + link
-                description = get_job_description(full_link)
-                jobs.append({
-                    'title': title,
-                    'company': company,
-                    'location': loc,
-                    'link': full_link,
-                    'description': description
-                })
-            except Exception as e:
-                st.warning(f"Error parsing job card: {e}")
+        current_page = page + 1
+        status_text.text(f"Processing page {current_page}/{max_pages}...")
+        progress_bar.progress(current_page/max_pages)
+        
+        url = f"{base_url}&start={page*10}"
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            resp = requests.get(url, headers=headers, timeout=15)
+            if resp.status_code != 200:
+                st.warning(f"Failed to retrieve page {current_page} (Status: {resp.status_code})")
                 continue
-        time.sleep(1)
+                
+            soup = BeautifulSoup(resp.text, "html.parser")
+            job_cards = soup.find_all('div', class_='css-1gatmva e1v1l3u10') or soup.find_all('div', class_='css-1t7spv1')
+            
+            for card in job_cards:
+                try:
+                    title = card.find('h2').text.strip()
+                    company = card.find('a', class_='css-17s97q8').text.strip()
+                    loc = card.find('span', class_='css-5wys0k').text.strip()
+                    link = card.find('a')['href']
+                    full_link = link if link.startswith('http') else f"https://wuzzuf.net{link}"
+                    
+                    jobs.append({
+                        'Job Title': title,
+                        'Company': company,
+                        'Location': loc,
+                        'Link': full_link,
+                        'Page': current_page
+                    })
+                except Exception as e:
+                    continue
+                    
+            time.sleep(1.5)  # Respectful scraping delay
+            
+        except Exception as e:
+            st.error(f"Error processing page {current_page}: {str(e)}")
+            continue
+    
+    progress_bar.empty()
+    status_text.empty()
+    
+    if not jobs:
+        st.error("No jobs found. Please adjust your search criteria.")
+        return None
+    
+    # Get descriptions for top jobs only (for performance)
+    with st.spinner("Analyzing job descriptions..."):
+        for job in jobs[:50]:  # Limit for performance
+            job['Description'] = get_job_description(job['Link'])
+    
     return jobs
 
-# --- Analysis functions ---
-
-def extract_skills_from_description(description, skill_keywords):
-    found_skills = []
-    desc_lower = description.lower()
-    for skill in skill_keywords:
-        if skill.lower() in desc_lower:
-            found_skills.append(skill)
-    return list(set(found_skills))
-
-def analyze_jobs(jobs, skill_keywords):
-    titles = [job['title'] for job in jobs]
-    locations = [job['location'] for job in jobs]
-
+# Analysis functions
+def analyze_results(jobs, skills):
+    if not jobs:
+        return None, None, None
+    
+    # Title analysis
+    titles = [job['Job Title'] for job in jobs]
+    title_counts = Counter(titles).most_common()
+    
+    # Skill analysis
     all_skills = []
     for job in jobs:
-        skills = extract_skills_from_description(job.get('description', ''), skill_keywords)
-        all_skills.extend(skills)
+        desc = job.get('Description', '').lower()
+        found_skills = [skill for skill in skills if skill.lower() in desc]
+        all_skills.extend(found_skills)
+    skill_counts = Counter(all_skills).most_common()
+    
+    # Location analysis
+    locations = [job['Location'] for job in jobs]
+    location_counts = Counter(locations).most_common()
+    
+    return title_counts, skill_counts, location_counts
 
-    title_counts = Counter(titles)
-    skill_counts = Counter(all_skills)
-    location_counts = Counter(locations)
+# Main app flow
+if st.button("Start Search", type="primary"):
+    if not job_query or not location:
+        st.warning("Please enter both job keywords and location")
+    else:
+        with st.spinner("Searching for jobs..."):
+            jobs_data = scrape_wuzzuf_jobs(job_query, location, max_pages)
+        
+        if jobs_data:
+            st.success(f"Found {len(jobs_data)} jobs!")
+            
+            # Analyze data
+            titles, skills, locations = analyze_results(jobs_data, skill_list)
+            
+            # Display results in tabs
+            tab1, tab2, tab3 = st.tabs(["Job Listings", "Market Analysis", "Raw Data"])
+            
+            with tab1:
+                st.subheader("Recent Job Postings")
+                cols = st.columns(3)
+                for idx, job in enumerate(jobs_data[:9]):  # Show 9 jobs in 3x3 grid
+                    with cols[idx%3]:
+                        with st.expander(f"{job['Job Title'][:30]}..."):
+                            st.markdown(f"""
+                            **Company:** {job['Company']}  
+                            **Location:** {job['Location']}  
+                            **Page:** {job['Page']}  
+                            [View Job]({job['Link']})
+                            """)
+                            if job.get('Description'):
+                                st.caption(job['Description'][:200] + "...")
+            
+            with tab2:
+                st.subheader("Job Market Insights")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("#### Top Job Titles")
+                    if titles:
+                        title_df = pd.DataFrame(titles[:10], columns=['Job Title', 'Count'])
+                        st.bar_chart(title_df.set_index('Job Title'))
+                    else:
+                        st.warning("No title data available")
+                
+                with col2:
+                    st.markdown("#### Most Demanded Skills")
+                    if skills:
+                        skill_df = pd.DataFrame(skills[:10], columns=['Skill', 'Count'])
+                        st.bar_chart(skill_df.set_index('Skill'))
+                    else:
+                        st.warning("No skill data available")
+                
+                st.markdown("#### Geographic Distribution")
+                if locations:
+                    loc_df = pd.DataFrame(locations, columns=['Location', 'Count'])
+                    st.dataframe(loc_df)
+                else:
+                    st.warning("No location data available")
+            
+            with tab3:
+                st.subheader("Complete Job Data")
+                st.dataframe(pd.DataFrame(jobs_data), height=500)
+                
+                # Export button
+                csv = pd.DataFrame(jobs_data).to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="Download as CSV",
+                    data=csv,
+                    file_name=f"jobs_{job_query}_{location}.csv",
+                    mime='text/csv'
+                )
 
-    return title_counts.most_common(), skill_counts.most_common(), location_counts.most_common()
+else:
+    st.info("Click the 'Start Search' button to begin your job market analysis")
 
-# --- Reporting functions ---
-
-def create_trends_summary(top_roles, top_skills):
-    if not top_roles or not top_skills:
-        return "No data available to create trends summary."
-    summary = f"The role '{top_roles[0][0]}' is currently the most demanded position, with {top_roles[0][1]} job postings. "
-    summary += f"Key skills in demand include {', '.join([skill for skill, _ in top_skills[:5]])}. "
-    summary += "The market shows strong growth in AI/ML jobs across the MENA region, especially in Egypt, UAE, and Saudi Arabia."
-    return summary
-
-def generate_markdown_report(top_roles, top_skills, location_distribution, trends_summary):
-    md = "# Top AI/ML Jobs in MENA – May 2025\n\n"
-
-    md += "## Top 10 AI/ML Roles\n"
-    for i, (role, count) in enumerate(top_roles[:10], 1):
-        md += f"{i}. {role} ({count} postings)\n"
-
-    md += "\n## Key Skills Required\n"
-    md += ", ".join([skill for skill, _ in top_skills[:15]]) + "\n"
-
-    md += "\n## Country-wise Job Distribution\n"
-    for country, count in location_distribution:
-        md += f"- {country}: {count} jobs\n"
-
-    md += "\n## Trends & Observations\n"
-    md += trends_summary + "\n"
-
-    return md
-
-# --- Streamlit app UI ---
-
-st.title("MENA AI/ML Jobs Dashboard - May 2025")
-
-query = st.text_input("Job Query", value="Machine Learning")
-location = st.text_input("Location", value="Egypt")
-max_pages = st.slider("Pages to Scrape", min_value=1, max_value=5, value=2)
-skill_keywords_input = st.text_area("Skills Keywords (comma separated)", 
-                                   value="Python, TensorFlow, PyTorch, Deep Learning, NLP, SQL, Docker, Keras, Scikit-learn")
-
-if st.button("Scrape and Analyze"):
-    skill_keywords = [s.strip() for s in skill_keywords_input.split(",") if s.strip()]
-    with st.spinner("Scraping jobs... this may take a while."):
-        jobs_data = scrape_wuzzuf_with_desc(query=query, location=location, max_pages=max_pages)
-
-    st.success(f"Scraped {len(jobs_data)} jobs.")
-
-    with st.spinner("Analyzing data..."):
-        top_roles, top_skills, top_locations = analyze_jobs(jobs_data, skill_keywords)
-        trends_summary = create_trends_summary(top_roles, top_skills)
-        report_md = generate_markdown_report(top_roles, top_skills, top_locations, trends_summary)
-
-    st.markdown(report_md)
-
-    if st.checkbox("Show raw jobs data"):
-        st.write(jobs_data)
+# Footer
+st.markdown("---")
+st.caption("Developed by [Your Name] - © 2023 | Data sourced from Wuzzuf.net")
